@@ -1,0 +1,627 @@
+-- made by yua, yes im finna upload more
+local replicatedStorage = game:GetService("ReplicatedStorage")
+local httpService = game:GetService("HttpService")
+ 
+local chess = replicatedStorage:WaitForChild("Chess", 15)
+if not chess then
+    error("ReplicatedStorage.Chess wasn't found")
+end
+ 
+local engine = require(chess:WaitForChild("Engine"))
+local bot = require(chess:WaitForChild("Bot"))
+ 
+if type(loadstring) ~= "function" then
+    error("get a better executor that supports game:HttpGet")
+end
+ 
+local windUI
+local loaded, loadError = pcall(function()
+    windUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+end)
+ 
+if not loaded or not windUI then
+    error("wind ui coundt load: " .. tostring(loadError))
+end
+ 
+local config_dir = "configs_yse"
+local meta_file = "bestconfig.json"
+ 
+local highlight_green = Color3.fromRGB(50, 205, 50)
+local highlight_blue  = Color3.fromRGB(30, 144, 255)
+local promotion_types = { q = 5, r = 4, b = 3, n = 2 }
+ 
+local state = {
+    autoPlay = false,
+    model = "vortex bot",
+    playDelay = 0.35,
+    depth = 12,
+    autoPlayChoice = "first best",
+    showBest = false,
+    showSecond = false,
+    autoloadConfig = false,
+    currentConfig = "",
+    controller = nil,
+    lastScan = 0,
+    scanError = nil,
+    workerRunning = false,
+    destroyed = false,
+    analysisBusy = false,
+    analysisStartedAt = 0,
+    analysisToken = 0,
+    currentSession = nil,
+    lastAutoFen = nil,
+    lastFailFen = nil,
+    best = nil,
+    secondBest = nil
+}
+ 
+local ui = {}
+ 
+local function notify(title, content, icon)
+    windUI:Notify({ Title = title, Content = content, Icon = icon or "info", Duration = 3 })
+end
+ 
+local function ensureDir()
+    if type(makefolder) == "function" and type(isfolder) == "function" then
+        if not isfolder(config_dir) then
+            makefolder(config_dir)
+        end
+    end
+end
+ 
+local function listConfigs()
+    ensureDir()
+    local list = {}
+    if type(listfiles) == "function" then
+        local files = listfiles(config_dir)
+        if type(files) == "table" then
+            for _, f in ipairs(files) do
+                local name = string.match(f, "[^/\\]+$")
+                if name then
+                    name = string.match(name, "^(.+)%.json$")
+                    if name and name ~= "" then
+                        table.insert(list, name)
+                    end
+                end
+            end
+        end
+    end
+    table.sort(list)
+    return list
+end
+ 
+local function saveConfig(name, data)
+    ensureDir()
+    if type(writefile) ~= "function" then return false end
+    local path = config_dir .. "/" .. name .. ".json"
+    writefile(path, httpService:JSONEncode(data))
+    return true
+end
+ 
+local function loadConfig(name)
+    if type(isfile) ~= "function" or type(readfile) ~= "function" then return nil end
+    local path = config_dir .. "/" .. name .. ".json"
+    if not isfile(path) then return nil end
+    local content = readfile(path)
+    if type(content) ~= "string" then return nil end
+    local okDec, data = pcall(function() return httpService:JSONDecode(content) end)
+    if not okDec or type(data) ~= "table" then return nil end
+    return data
+end
+ 
+local function deleteConfig(name)
+    if type(delfile) == "function" then
+        delfile(config_dir .. "/" .. name .. ".json")
+    end
+end
+ 
+local function saveMeta()
+    if type(writefile) ~= "function" then return end
+    local meta = {
+        autoloadConfig = state.autoloadConfig,
+        currentConfig = state.currentConfig
+    }
+    writefile(meta_file, httpService:JSONEncode(meta))
+end
+ 
+local function loadMeta()
+    if type(isfile) ~= "function" or type(readfile) ~= "function" then return end
+    if not isfile(meta_file) then return end
+    local content = readfile(meta_file)
+    if type(content) ~= "string" then return end
+    local okDec, data = pcall(function() return httpService:JSONDecode(content) end)
+    if not okDec or type(data) ~= "table" then return end
+    if type(data.autoloadConfig) == "boolean" then state.autoloadConfig = data.autoloadConfig end
+    if type(data.currentConfig) == "string" then state.currentConfig = data.currentConfig end
+end
+ 
+local function applyConfigData(data)
+    if type(data) ~= "table" then return end
+    if type(data.autoPlay) == "boolean" then state.autoPlay = data.autoPlay end
+    if type(data.model) == "string" then state.model = data.model:lower() end
+    if type(data.autoPlayChoice) == "string" then state.autoPlayChoice = data.autoPlayChoice:lower() end
+    if type(data.playDelay) == "number" then state.playDelay = math.clamp(data.playDelay, 0.1, 2) end
+    if type(data.depth) == "number" then state.depth = math.clamp(math.floor(data.depth), 4, 24) end
+    if type(data.showBest) == "boolean" then state.showBest = data.showBest end
+    if type(data.showSecond) == "boolean" then state.showSecond = data.showSecond end
+end
+ 
+local function getCurrentConfigData()
+    return {
+        autoPlay = state.autoPlay,
+        model = state.model,
+        playDelay = state.playDelay,
+        depth = state.depth,
+        autoPlayChoice = state.autoPlayChoice,
+        showBest = state.showBest,
+        showSecond = state.showSecond
+    }
+end
+ 
+local function setControl(component, value)
+    if not component then return end
+    component:Set(value)
+    component:SetValue(value)
+end
+ 
+local function refreshDropdown(component, values, currentValue)
+    if not component then return end
+    component:Refresh(values, true)
+    if currentValue ~= nil then
+        component:Set(currentValue)
+    end
+end
+ 
+ 
+local invalidateAnalysis, isController, getUpvalueValues, findController, getPosition, currentFen, isMyTurn, moveBlockReason, clearArrows, clearBestArrow, clearSecondArrow, isArrowIntact, drawArrow, analyzeVortexBot, analyzeChessApi, analyzePosition, sendUciMove, startWorker, runAnalysis, setAutoPlay
+ 
+loadMeta()
+if state.autoloadConfig and state.currentConfig ~= "" then
+    local data = loadConfig(state.currentConfig)
+    if data then applyConfigData(data) end
+end
+state.model = state.model:lower()
+if state.model == "lichess" then state.model = "chess api" end
+ 
+local Window = windUI:CreateWindow({
+    Title = "rochess - made by yua",
+    Author = "@youtubeyua yes im finna upload more",
+    Icon = "circle-star",
+    Folder = "rochessyuaconfigthinglol",
+    Size = UDim2.fromOffset(590, 500),
+    MinSize = Vector2.new(500, 400),
+    Theme = "Dark",
+    Resizable = true,
+    HideSearchBar = false,
+    ScrollBarEnabled = true
+})
+ 
+pcall(function()
+    Window:SetToggleKey(Enum.KeyCode.K)
+end)
+ 
+local VortexTab = Window:Tab({ Title = "main", Icon = "cpu" })
+local ClosetTab = Window:Tab({ Title = "visuals", Icon = "shirt" })
+local SettingsTab = Window:Tab({ Title = "settings", Icon = "settings" })
+ 
+local VortexSection = VortexTab:Section({ Title = "stockfish", Box = true, Opened = true })
+local ClosetSection = ClosetTab:Section({ Title = "visuals", Box = true, Opened = true })
+local ConfigsSection = SettingsTab:Section({ Title = "config options", Box = true, Opened = true })
+local AutoSection = SettingsTab:Section({ Title = "auto load", Box = true, Opened = true })
+ 
+ui.autoPlayToggle = VortexSection:Toggle({
+    Title = "auto move",
+    Desc = "let bots play (lowk blatant)",
+    Value = state.autoPlay,
+    Callback = function(value)
+        setAutoPlay(value)
+    end
+})
+ 
+ 
+setAutoPlay = function(value)
+    if state.autoPlay == value then return end
+    state.autoPlay = value
+    if value then
+        state.lastAutoFen = nil
+        startWorker()
+        notify("auto move", "toggled", "play")
+    else
+        notify("auto move", "untoggled", "circle-stop")
+    end
+end
+ 
+ui.autoPlayKeybind = VortexSection:Keybind({
+    Title = "auto move keybind",
+    Desc = "keybind 4 automove",
+    Value = Enum.KeyCode.J,
+    Callback = function()
+        local newValue = not state.autoPlay
+        -- :Set first in its own pcall so the toggle visually flips AND fires its
+        -- callback (which calls setAutoPlay). Separate pcall from :SetValue so
+        -- if one method is missing on this WindUI fork the other still runs.
+        pcall(function() ui.autoPlayToggle:Set(newValue) end)
+        pcall(function() ui.autoPlayToggle:SetValue(newValue) end)
+        -- if :Set didn't fire the callback (or errored), state.autoPlay is still
+        -- the old value â€” fall back to calling setAutoPlay directly.
+        if state.autoPlay ~= newValue then
+            setAutoPlay(newValue)
+        end
+    end
+})
+ 
+ui.modelDropdown = VortexSection:Dropdown({
+    Title = "stockfish options",
+    Desc = "pick the bot",
+    Values = { "vortex bot", "chess api" },
+    Value = state.model,
+    Callback = function(value)
+        state.model = value
+        invalidateAnalysis(true)
+        clearArrows()
+        notify("model changed", "using " .. value, "cpu")
+    end
+})
+ 
+ui.moveDelaySlider = VortexSection:Slider({
+    Title = "move delay",
+    Desc = "the delay for autoplay",
+    Step = 0.05,
+    Value = { Min = 0.1, Max = 2, Default = state.playDelay },
+    Callback = function(value)
+        state.playDelay = math.clamp(tonumber(value) or 0.35, 0.1, 2)
+    end
+})
+ 
+ui.depthSlider = VortexSection:Slider({
+    Title = "thinking depth",
+    Desc = "higher = stronger might delay the bots tho",
+    Step = 1,
+    Value = { Min = 4, Max = 24, Default = state.depth },
+    Callback = function(value)
+        state.depth = math.clamp(math.floor(tonumber(value) or 12), 4, 24)
+        invalidateAnalysis(true)
+        clearArrows()
+    end
+})
+ 
+ui.autoPlayDropdown = VortexSection:Dropdown({
+    Title = "auto play",
+    Desc = "what move autoplay plays",
+    Values = { "first best", "second best" },
+    Value = state.autoPlayChoice,
+    Callback = function(value)
+        state.autoPlayChoice = value
+        state.lastAutoFen = nil
+        notify("auto play", value, "move")
+    end
+})
+ 
+ui.showBestToggle = ClosetSection:Toggle({
+    Title = "show best move",
+    Desc = "show best move (green)",
+    Value = state.showBest,
+    Callback = function(value)
+        state.showBest = value
+        local app = state.controller
+        if not value then
+            clearBestArrow(app)
+        end
+        if value and not state.workerRunning then
+            startWorker()
+        end
+    end
+})
+ 
+ui.showSecondToggle = ClosetSection:Toggle({
+    Title = "show second best move",
+    Desc = "shows second best move (blue)",
+    Value = state.showSecond,
+    Callback = function(value)
+        state.showSecond = value
+        local app = state.controller
+        if not value then
+            clearSecondArrow(app)
+        end
+        if value and not state.workerRunning then
+            startWorker()
+        end
+    end
+})
+ 
+local configNameInput = ""
+ui.chooseConfigDropdown = nil
+ 
+ConfigsSection:Input({
+    Title = "name config",
+    Desc = "name for new config.",
+    Value = "",
+    InputIcon = "pen",
+    Type = "Input",
+    Placeholder = "legit-config",
+    Callback = function(value)
+        configNameInput = tostring(value or "")
+    end
+})
+ 
+ConfigsSection:Button({
+    Title = "create config",
+    Icon = "file-plus",
+    Callback = function()
+        local name = configNameInput
+        if name == "" then
+            notify("no name", "choose a name", "circle-alert")
+            return
+        end
+        if saveConfig(name, getCurrentConfigData()) then
+            state.currentConfig = name
+            saveMeta()
+            notify("config created", name, "check")
+            refreshDropdown(ui.chooseConfigDropdown, listConfigs(), name)
+        else
+            notify("uh oh", "creating the fig failed", "circle-alert")
+        end
+    end
+})
+ 
+ui.chooseConfigDropdown = ConfigsSection:Dropdown({
+    Title = "choose config",
+    Desc = "choose ur config ",
+    Values = listConfigs(),
+    Value = state.currentConfig,
+    Callback = function(value)
+        state.currentConfig = value
+        local data = loadConfig(value)
+        if data then
+            applyConfigData(data)
+            setControl(ui.autoPlayToggle, state.autoPlay)
+            setControl(ui.modelDropdown, state.model)
+            setControl(ui.moveDelaySlider, state.playDelay)
+            setControl(ui.depthSlider, state.depth)
+            setControl(ui.autoPlayDropdown, state.autoPlayChoice)
+            setControl(ui.showBestToggle, state.showBest)
+            setControl(ui.showSecondToggle, state.showSecond)
+            invalidateAnalysis(true)
+            clearArrows()
+            saveMeta()
+            if state.autoPlay or state.showBest or state.showSecond then
+                startWorker()
+            end
+            notify("config loaded", value, "check")
+        end
+    end
+})
+ 
+ConfigsSection:Button({
+    Title = "overwrite config",
+    Icon = "save",
+    Callback = function()
+        if state.currentConfig == "" then
+            notify("no config", "ru deadass?", "circle-alert")
+            return
+        end
+        if saveConfig(state.currentConfig, getCurrentConfigData()) then
+            notify("saved", state.currentConfig, "check")
+        else
+            notify("save failed", "yikes save failed", "circle-alert")
+        end
+    end
+})
+ 
+ConfigsSection:Button({
+    Title = "delete config",
+    Icon = "trash",
+    Callback = function()
+        if state.currentConfig == "" then
+            notify("no config", "hey smartass choose a cofing", "circle-alert")
+            return
+        end
+        deleteConfig(state.currentConfig)
+        local deleted = state.currentConfig
+        state.currentConfig = ""
+        saveMeta()
+        refreshDropdown(ui.chooseConfigDropdown, listConfigs(), "")
+        notify("config deleted", deleted, "check")
+    end
+})
+ 
+ui.autoloadConfigToggle = AutoSection:Toggle({
+    Title = "autoload config",
+    Desc = "it autoloads the config (no really?!)",
+    Value = state.autoloadConfig,
+    Callback = function(value)
+        state.autoloadConfig = value
+        saveMeta()
+        notify("autoload config", value and "on" or "off", value and "check" or "x")
+    end
+})
+ 
+notify("yessireyyy", "we ready", "check")
+ 
+invalidateAnalysis = function(clearSecondBest)
+    state.best = nil
+    if clearSecondBest then
+        state.secondBest = nil
+    end
+    state.lastAutoFen = nil
+    state.lastFailFen = nil
+end
+ 
+isController = function(value)
+    if type(value) ~= "table" then return false end
+    local board = value.board
+    if type(board) ~= "table" then return false end
+    if type(value.render) ~= "function"
+        or type(value.onBoardMove) ~= "function"
+        or type(value.setSession) ~= "function" then
+        return false
+    end
+    return type(board.setTint) == "function" and type(board.setArrow) == "function"
+end
+ 
+getUpvalueValues = function(fn)
+    local values = {}
+    if type(debug) == "table" and type(debug.getupvalues) == "function" then
+        local ok, result = pcall(function() return debug.getupvalues(fn) end)
+        if ok and type(result) == "table" then
+            for _, v in pairs(result) do table.insert(values, v) end
+        end
+    end
+    if #values == 0 and type(debug) == "table" and type(debug.getupvalue) == "function" then
+        for i = 1, 60 do
+            local ok, name, val = pcall(function() return debug.getupvalue(fn, i) end)
+            if not ok or name == nil then break end
+            table.insert(values, val ~= nil and val or name)
+        end
+    end
+    return values
+end
+ 
+findController = function(force)
+    if state.controller and isController(state.controller) then
+        return state.controller
+    end
+    if not force and os.clock() - state.lastScan < 1 then
+        return nil
+    end
+    state.lastScan = os.clock()
+    state.controller = nil
+    state.scanError = nil
+ 
+    if type(getgc) ~= "function" then
+        state.scanError = "executor doesnt expose getgc"
+        return nil
+    end
+ 
+    local objects = getgc(true)
+    if type(objects) ~= "table" then
+        objects = getgc()
+    end
+    if type(objects) ~= "table" then
+        return nil
+    end
+ 
+    for _, obj in pairs(objects) do
+        if isController(obj) then
+            state.controller = obj
+            return obj
+        end
+    end
+ 
+    for _, obj in pairs(objects) do
+        if type(obj) == "function" then
+            for _, upv in ipairs(getUpvalueValues(obj)) do
+                if isController(upv) then
+                    state.controller = upv
+                    return upv
+                end
+            end
+        end
+    end
+ 
+    return nil
+end
+ 
+getPosition = function(app)
+    if not app then
+        return nil, nil
+    end
+    local session = app.session
+    if type(session) ~= "table" then
+        return nil, nil
+    end
+    if type(session.engine) ~= "table" or type(session.engine.getFen) ~= "function" then
+        return session, nil
+    end
+    local fen = session.engine:getFen()
+    if type(fen) ~= "string" or fen == "" then
+        return session, nil
+    end
+    return session, fen, nil
+end
+ 
+currentFen = function(session)
+    if not session or type(session.engine) ~= "table" then return nil end
+    local fen = session.engine:getFen()
+    if type(fen) == "string" then return fen end
+    return nil
+end
+ 
+isMyTurn = function(session)
+    if not session then return false end
+    if type(session.isMyTurn) == "function" then
+        local r = session:isMyTurn()
+        if type(r) == "boolean" then return r end
+    end
+    local fen = currentFen(session)
+    local side = fen and string.match(fen, "^[^ ]+%s+([wb])")
+    local sideValue = side == "w" and 1 or side == "b" and -1 or nil
+    return sideValue ~= nil and session.myColor ~= nil and sideValue == session.myColor
+end
+ 
+moveBlockReason = function(session)
+    if not session then return true end
+    if session.over then return true end
+    if type(session.ucis) == "table"
+        and type(session.viewPly) == "number"
+        and session.viewPly < #session.ucis then
+        return true
+    end
+    if not isMyTurn(session) then return true end
+    return false
+end
+ 
+clearArrows = function(app)
+    app = app or state.controller
+    if not app or not app.board then return end
+    app.board:setTint("best_arrow", nil)
+    app.board:setArrow("best_arrow", nil)
+    app.board:setTint("second_best_arrow", nil)
+    app.board:setArrow("second_best_arrow", nil)
+end
+ 
+clearBestArrow = function(app)
+    app = app or state.controller
+    if not app or not app.board then return end
+    app.board:setTint("best_arrow", nil)
+    app.board:setArrow("best_arrow", nil)
+end
+ 
+clearSecondArrow = function(app)
+    app = app or state.controller
+    if not app or not app.board then return end
+    app.board:setTint("second_best_arrow", nil)
+    app.board:setArrow("second_best_arrow", nil)
+end
+ 
+isArrowIntact = function(app, name, fromIndex, toIndex, color)
+    local board = app and app.board
+    if not board then return false end
+    local arrows = board.arrows
+    if type(arrows) ~= "table" then return false end
+    local existing = arrows[name]
+    if type(existing) ~= "table" then return false end
+    if existing.from ~= fromIndex or existing.to ~= toIndex or existing.color ~= color then
+        return false
+    end
+    local parts = existing.parts
+    if type(parts) ~= "table" or #parts == 0 or parts[1] == nil then return false end
+    local p1 = parts[1]
+    if typeof(p1) == "Instance" and p1.Parent == nil then return false end
+    return true
+end
+ 
+drawArrow = function(app, name, uci, color)
+    if not app or not app.board then return false end
+    if type(uci) ~= "string" or #uci < 4 then return false end
+    local fromIndex = engine.algToIndex64(string.sub(uci, 1, 2))
+    local toIndex = engine.algToIndex64(string.sub(uci, 3, 4))
+    if type(fromIndex) ~= "number" or type(toIndex) ~= "number" then return false end
+ 
+    if isArrowIntact(app, name, fromIndex, toIndex, color) then
+        return true
+    end
+ 
+    app.board:setTint(name, fromIndex, color, 0.35)
+    app.board:setArrow(name, fromIndex, toIndex, color, 0.6)
+    
